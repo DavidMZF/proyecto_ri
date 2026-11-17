@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sistema de Recuperación de Información</title>
+<style>
+  :root{--bg:#f6f7f9;--card:#fff;--ink:#1c2430;--mute:#667085;--line:#e3e7ee;--acc:#2f5fd0;--ok:#16794a}
+  @media (prefers-color-scheme:dark){:root{--bg:#12161c;--card:#1a2029;--ink:#e6eaf0;--mute:#98a2b3;--line:#2b3340;--acc:#7da2ff;--ok:#5fd39a}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  header{padding:22px 20px 0;max-width:1240px;margin:auto}
+  h1{font-size:21px;margin:0 0 2px} .sub{color:var(--mute);font-size:13px}
+  nav{display:flex;gap:4px;margin:16px 0 0;border-bottom:1px solid var(--line)}
+  nav button{background:none;border:0;padding:10px 16px;font:inherit;color:var(--mute);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+  nav button.on{color:var(--acc);border-color:var(--acc);font-weight:600}
+  main{max-width:1240px;margin:auto;padding:18px 20px 60px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}
+  .bar{display:flex;gap:12px;flex-wrap:wrap;align-items:end;margin-top:10px}
+  .bar:first-child{margin-top:0}
+  .bar label.f{display:flex;flex-direction:column;font-size:12px;color:var(--mute);gap:3px}
+  input[type=text],input[type=number]{font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--ink)}
+  input[type=text]{min-width:300px;flex:1}
+  .chk{font-size:14px;display:flex;align-items:center;gap:5px}
+  button.go{background:var(--acc);color:#fff;border:0;border-radius:7px;padding:9px 18px;font:inherit;font-weight:600;cursor:pointer}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-top:16px}
+  .col h3{margin:0 0 8px;font-size:14px;padding-bottom:6px;border-bottom:3px solid var(--line)}
+  .doc{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:8px 10px;margin-bottom:8px}
+  .doc .t{font-weight:600;font-size:13px} .doc .m{font-size:12px;color:var(--mute)}
+  .doc .s{font-size:13px;color:var(--mute)}
+  .rank{display:inline-block;min-width:26px;color:var(--mute)}
+  .dots{display:inline-flex;gap:3px;margin-left:6px;vertical-align:middle}
+  .dots i{width:8px;height:8px;border-radius:50%;display:inline-block}
+  table{border-collapse:collapse;width:100%;font-size:13px}
+  th,td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:right}
+  th:first-child,td:first-child{text-align:left} th{color:var(--mute);font-weight:600}
+  td.best{font-weight:700;color:var(--ok)}
+  .bars .r{display:grid;grid-template-columns:200px 1fr 60px;gap:10px;align-items:center;margin:6px 0;font-size:13px}
+  .bars .b{height:14px;border-radius:4px}
+  h2{font-size:16px;margin:24px 0 8px} .note{font-size:12.5px;color:var(--mute)}
+  .hidden{display:none} .pq{max-height:460px;overflow:auto}
+</style>
+</head>
+<body>
+{% set colores = {'binario':'#8a5cf6','tfidf':'#e08a00','bm25':'#0e8f8f','embeddings':'#d6456b'} %}
+{% set etiquetas = {'binario':'Binario (Jaccard)','tfidf':'Vectorial TF-IDF','bm25':'Probabilístico (BM25)','embeddings':'Vectorial (Embeddings FAISS)'} %}
+{% set seleccion = request.form.getlist('modelos') if request.method == 'POST' else modelos %}
+
+<header>
+  <h1>Sistema de Recuperación de Información</h1>
+  <div class="sub">Corpus FiQA-2018: {{ docs|length }} documentos</div>
+  <nav>
+    <button class="on" data-tab="search">Buscar y comparar</button>
+    <button data-tab="metrics">Evaluación</button>
+  </nav>
+</header>
+
+<main>
+<!-- ================= BUSCAR Y COMPARAR ================= -->
+<section id="tab-search">
+  <div class="card">
+    <form method="post">
+      <div class="bar">
+        <label class="f" style="flex:1">Consulta de texto libre
+          <input type="text" name="consulta" value="{{ consulta }}" required placeholder="p. ej. how to invest in stocks"></label>
+        <label class="f">Top-n
+          <input type="number" name="n" value="{{ request.form.get('n', 5) }}" min="1" max="20" style="width:70px"></label>
+        <button class="go">Buscar</button>
+      </div>
+      <div class="bar">
+        {% for m in modelos %}
+          <label class="chk"><input type="checkbox" name="modelos" value="{{ m }}" {% if m in seleccion %}checked{% endif %}>
+            <span style="color:{{ colores[m] }}">&#9679;</span> {{ etiquetas[m] }}</label>
+        {% endfor %}
+      </div>
+      <div class="note" style="margin-top:8px">Marca uno o varios modelos. Con varios se comparan en columnas; los puntos de colores indican en qué otros modelos aparece también cada documento.</div>
+    </form>
+  </div>
+
+  <div class="grid">
+  {% for m, lista in resultados.items() %}
+    <div class="col">
+      <h3 style="border-color:{{ colores[m] }}">{{ etiquetas[m] }}</h3>
+      {% for doc, score in lista %}
+        <div class="doc">
+          <div class="t"><span class="rank">{{ loop.index }}.</span>doc {{ doc }}
+            <span class="dots">
+              {% for m2, l2 in resultados.items() %}
+                {% if m2 != m and doc in l2|map('first')|list %}
+                  <i title="{{ etiquetas[m2] }}" style="background:{{ colores[m2] }}"></i>
+                {% endif %}
+              {% endfor %}
+            </span>
+          </div>
+          <div class="m">score {{ "%.3f"|format(score) }}</div>
+          <div class="s">{{ docs[doc][:200] }}…</div>
+        </div>
+      {% else %}
+        <p class="note">Sin resultados (ningún término de la consulta aparece en el corpus).</p>
+      {% endfor %}
+    </div>
+  {% endfor %}
+  </div>
+</section>
+
+<!-- ================= EVALUACIÓN ================= -->
+<section id="tab-metrics" class="hidden">
+  {% set ns = namespace(mx=0.0001) %}
+  {% for m, (filas, MAP) in metricas.items() %}
+    {% if MAP > ns.mx %}{% set ns.mx = MAP %}{% endif %}
+  {% endfor %}
+
+  <div class="card">
+    <b>Evaluación sobre {{ metricas['bm25'][0]|length }} consultas con qrels</b>
+    <span class="note">· MAP@10; Precision y Recall promediadas entre consultas</span>
+    <div class="bars" style="margin:14px 0">
+      {% for m, (filas, MAP) in metricas.items() %}
+        <div class="r"><span>{{ etiquetas[m] }}</span>
+          <div><div class="b" style="width:{{ (MAP / ns.mx * 100)|round|int }}%;background:{{ colores[m] }}"></div></div>
+          <b>{{ "%.3f"|format(MAP) }}</b></div>
+      {% endfor %}
+    </div>
+    <table>
+      <tr><th>Modelo</th><th>MAP@10</th><th>Precision@10 media</th><th>Recall@10 media</th></tr>
+      {% for m, (filas, MAP) in metricas.items() %}
+        <tr><td>{{ etiquetas[m] }}</td>
+          <td class="{{ 'best' if MAP == ns.mx }}">{{ "%.3f"|format(MAP) }}</td>
+          <td>{{ "%.3f"|format((filas|sum(attribute='precision')) / filas|length) }}</td>
+          <td>{{ "%.3f"|format((filas|sum(attribute='recall')) / filas|length) }}</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  <!-- Embeddings vs BM25 -->
+  {% set emb = metricas['embeddings'][0] %}
+  {% set bm = metricas['bm25'][0] %}
+  {% set c = namespace(mejor=0, peor=0) %}
+  {% for e in emb %}
+    {% set d = e.ap - bm[loop.index0].ap %}
+    {% if d > 0.02 %}{% set c.mejor = c.mejor + 1 %}{% elif d < -0.02 %}{% set c.peor = c.peor + 1 %}{% endif %}
+  {% endfor %}
+  <h2>Embeddings vs. BM25 (por consulta, umbral ΔAP = 0.02)</h2>
+  <div class="card">Los embeddings mejoran a BM25 en <b>{{ c.mejor }}</b> consultas, empeoran en <b>{{ c.peor }}</b>
+    y son similares en <b>{{ emb|length - c.mejor - c.peor }}</b>.</div>
+
+  <!-- Detalle por consulta -->
+  <h2>Detalle por consulta (AP, Precision@10, Recall@10)</h2>
+  <div class="card pq" style="padding:0">
+    <table>
+      <tr><th>Consulta</th>
+        {% for m in modelos %}<th>AP {{ m }}</th><th>P</th><th>R</th>{% endfor %}</tr>
+      {% for e in emb %}
+        {% set i = loop.index0 %}
+        <tr><td>{{ e.consulta }}</td>
+          {% for m in modelos %}
+            {% set x = metricas[m][0][i] %}
+            <td>{{ "%.2f"|format(x.ap) }}</td><td>{{ "%.1f"|format(x.precision) }}</td><td>{{ "%.2f"|format(x.recall) }}</td>
+          {% endfor %}
+        </tr>
+      {% endfor %}
+    </table>
+  </div>
+</section>
+</main>
+
+<script>
+  var botones = document.querySelectorAll('nav button');
+  botones.forEach(function (b) {
+    b.onclick = function () {
+      botones.forEach(function (x) { x.classList.toggle('on', x === b); });
+      ['search', 'metrics'].forEach(function (t) {
+        document.getElementById('tab-' + t).classList.toggle('hidden', t !== b.dataset.tab);
+      });
+    };
+  });
+</script>
+</body>
+</html>
