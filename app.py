@@ -7,9 +7,6 @@ MODELOS = ["binario", "tfidf", "bm25", "embeddings"]
 sis, queries, qrels = cargar_sistema("datos")
 METRICAS = {m: evaluar(sis, m, queries, qrels) for m in MODELOS}
 
-import psutil, os
-print("RAM usada (MB):", psutil.Process(os.getpid()).memory_info().rss / 1e6)
-
 @app.route("/", methods=["GET", "POST"])
 def inicio():
     consulta, resultados = "", {}
