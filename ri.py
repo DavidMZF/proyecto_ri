@@ -1,4 +1,4 @@
-import re, math, random
+import re, math, random, heapq, time
 from collections import Counter, defaultdict
 import numpy as np
 import faiss
@@ -9,30 +9,48 @@ from nltk.stem import PorterStemmer
 from sentence_transformers import SentenceTransformer
 import html
 import os, json
+from functools import lru_cache
 
 nltk.download("stopwords", quiet=True)
 STOP = set(stopwords.words("english"))
 STEM = PorterStemmer()
 
+@lru_cache(maxsize=None)
+def raiz(token):
+    return STEM.stem(token)
 
 def cargar_corpus(ruta):
+    import pandas as pd
     df = pd.read_parquet(ruta)
-    return {str(i): html.unescape(f"{t} {x}").replace('""', '"')
-            for i, t, x in zip(df["_id"], df["title"], df["text"])}
+    docs = {}
+    for i, t, x in zip(df["_id"], df["title"], df["text"]):
+        texto = html.unescape(f"{t or ''} {x or ''}").replace('""', '"').strip()
+        if texto:                                   # descartar documentos vacíos
+            docs[str(i)] = texto
+    return docs
 
 def cargar_queries(ruta):
     df = pd.read_parquet(ruta)                       # columnas: _id, text
     return {str(i): t for i, t in zip(df["_id"], df["text"])}
 
 def cargar_qrels(ruta):
-    qrels = defaultdict(set)              # query_id -> {doc_id relevantes}
+    qrels = defaultdict(dict)                 # query_id -> {doc_id: grado}
     with open(ruta, encoding="utf-8") as f:
-        next(f)                           # saltar encabezado
+        next(f)
         for linea in f:
             qid, did, score = linea.strip().split("\t")
             if int(score) > 0:
-                qrels[qid].add(did)
+                qrels[qid][did] = int(score)
     return qrels
+
+def filtrar_qrels(docs, queries, qrels):
+    salida = {}
+    for q, rel in qrels.items():
+        if q in queries:
+            ok = {d: g for d, g in rel.items() if d in docs}
+            if ok:
+                salida[q] = ok
+    return salida
 
 def reducir(docs, queries, qrels, n_queries=50, n_extra=5000):
     qids = [q for q in qrels if q in queries][:n_queries]
@@ -46,8 +64,8 @@ def reducir(docs, queries, qrels, n_queries=50, n_extra=5000):
     return docs, queries, qrels
 
 def preprocesar(texto):
-    tokens = re.findall(r"[a-z]+", texto.lower())          # tokenización + normalización
-    return [STEM.stem(t) for t in tokens if t not in STOP and len(t) > 2]
+    tokens = re.findall(r"[a-z0-9]+", texto.lower())
+    return [raiz(t) for t in tokens if t not in STOP and len(t) > 1]
 
 def construir_indice(docs):
     indice = defaultdict(dict)        # término -> {doc: frecuencia}
@@ -117,7 +135,8 @@ def bm25(consulta, idx, k1=1.5, b=0.75):
 
 def construir_faiss(docs, modelo):
     ids = list(docs.keys())
-    emb = modelo.encode([docs[i] for i in ids], normalize_embeddings=True)
+    emb = modelo.encode([docs[i] for i in ids], normalize_embeddings=True,
+                    batch_size=64, show_progress_bar=True)
     index = faiss.IndexFlatIP(emb.shape[1])     # producto interno = coseno (vectores normalizados)
     index.add(np.array(emb, dtype="float32"))
     return index, ids
@@ -143,34 +162,65 @@ def buscar(sis, nombre, consulta, n=10):
         scores = bm25(consulta, sis["idx"])
     else:
         scores = semantico(consulta, sis, n)
-    return sorted(scores.items(), key=lambda x: x[1], reverse=True)[:n]
+    return heapq.nsmallest(n, scores.items(), key=lambda x: (-x[1], x[0]))
 
-def precision_recall(ranking, relevantes):
-    aciertos = sum(1 for d in ranking if d in relevantes)
-    return aciertos / max(len(ranking), 1), aciertos / len(relevantes)
+def precision_recall(ranking, rel, k):
+    aciertos = sum(1 for d in ranking[:k] if d in rel)
+    return aciertos / k, aciertos / len(rel)
 
-def average_precision(ranking, relevantes):
-    aciertos, suma = 0, 0
+def f1(p, r):
+    return 2 * p * r / (p + r) if p + r > 0 else 0.0
+
+def dcg(grados):
+    return sum((2 ** g - 1) / math.log2(i + 1) for i, g in enumerate(grados, 1))
+
+def ndcg(ranking, rel, k):
+    idcg = dcg(sorted(rel.values(), reverse=True)[:k])
+    if idcg == 0:
+        return 0.0
+    return dcg([rel.get(d, 0) for d in ranking[:k]]) / idcg
+
+def average_precision(ranking, rel):
+    aciertos, suma = 0, 0.0
     for i, d in enumerate(ranking, 1):
-        if d in relevantes:
+        if d in rel:
             aciertos += 1
             suma += aciertos / i
-    return suma / len(relevantes)
+    return suma / len(rel)
 
-def evaluar(sis, nombre, queries, qrels, k=10):
-    filas, aps = [], []
+def reciprocal_rank(ranking, rel):
+    for i, d in enumerate(ranking, 1):
+        if d in rel:
+            return 1 / i
+    return 0.0
+
+def promedio(filas, campo):
+    return sum(f[campo] for f in filas) / len(filas)
+
+def resumir(filas, ks, ms):
+    res = {"MAP": promedio(filas, "ap"), "MRR": promedio(filas, "rr"), "ms": ms}
+    for k in ks:
+        for m in ("P", "R", "F1", "NDCG"):
+            res[f"{m}@{k}"] = promedio(filas, f"{m}@{k}")
+    return res
+
+def evaluar(sis, nombre, queries, qrels, ks=(5, 10, 20), profundidad=100):
+    filas, t0 = [], time.perf_counter()
     for qid, rel in qrels.items():
-        ranking = [d for d, _ in buscar(sis, nombre, queries[qid], k)]
-        p, r = precision_recall(ranking, rel)
-        ap = average_precision(ranking, rel)
-        filas.append({"consulta": queries[qid], "precision": p, "recall": r, "ap": ap})
-        aps.append(ap)
-    return filas, sum(aps) / len(aps)       # (métricas por consulta, MAP)
+        ranking = [d for d, _ in buscar(sis, nombre, queries[qid], profundidad)]
+        fila = {"qid": qid, "consulta": queries[qid], "n_rel": len(rel),
+                "ap": average_precision(ranking, rel), "rr": reciprocal_rank(ranking, rel)}
+        for k in ks:
+            p, r = precision_recall(ranking, rel, k)
+            fila[f"P@{k}"], fila[f"R@{k}"], fila[f"F1@{k}"] = p, r, f1(p, r)
+            fila[f"NDCG@{k}"] = ndcg(ranking, rel, k)
+        filas.append(fila)
+    ms = (time.perf_counter() - t0) / len(qrels) * 1000
+    return filas, resumir(filas, ks, ms)
 
 def guardar_sistema(docs, queries, qrels, index, ids, carpeta="datos"):
     os.makedirs(carpeta, exist_ok=True)
-    datos = {"docs": docs, "queries": queries, "ids": ids,
-             "qrels": {q: sorted(r) for q, r in qrels.items()}}
+    datos = {"docs": docs, "queries": queries, "ids": ids, "qrels": qrels}
     for nombre, contenido in datos.items():
         with open(f"{carpeta}/{nombre}.json", "w", encoding="utf-8") as f:
             json.dump(contenido, f)
@@ -181,10 +231,9 @@ def cargar_sistema(carpeta="datos"):
     for nombre in ["docs", "queries", "ids", "qrels"]:
         with open(f"{carpeta}/{nombre}.json", encoding="utf-8") as f:
             datos[nombre] = json.load(f)
-    qrels = {q: set(r) for q, r in datos["qrels"].items()}
     idx = construir_indice(datos["docs"])
     preparar_tfidf(idx)
     sis = {"docs": datos["docs"], "idx": idx, "ids": datos["ids"],
            "modelo": SentenceTransformer("all-MiniLM-L6-v2"),
            "faiss": faiss.read_index(f"{carpeta}/faiss.index")}
-    return sis, datos["queries"], qrels
+    return sis, datos["queries"], datos["qrels"]

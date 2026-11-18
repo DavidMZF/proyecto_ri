@@ -105,61 +105,84 @@
 
 <!-- ================= EVALUACIÓN ================= -->
 <section id="tab-metrics" class="hidden">
-  {% set ns = namespace(mx=0.0001) %}
-  {% for m, (filas, MAP) in metricas.items() %}
-    {% if MAP > ns.mx %}{% set ns.mx = MAP %}{% endif %}
-  {% endfor %}
+  {% set M = metricas.modelos %}
+  {% set A = metricas.analisis %}
+  {% set cols = ['MAP', 'MRR', 'NDCG@5', 'NDCG@10', 'NDCG@20', 'P@5', 'P@10', 'R@10', 'R@20', 'F1@10'] %}
+  {% set mx = namespace(v=0.0001) %}
+  {% for m in modelos %}{% if M[m].resumen['NDCG@10'] > mx.v %}{% set mx.v = M[m].resumen['NDCG@10'] %}{% endif %}{% endfor %}
 
   <div class="card">
-    <b>Evaluación sobre {{ metricas['bm25'][0]|length }} consultas con qrels</b>
-    <span class="note">· MAP@10; Precision y Recall promediadas entre consultas</span>
+    <b>Evaluación sobre {{ metricas.n_consultas }} consultas con qrels y {{ metricas.n_docs }} documentos</b>
+    <div class="note">MAP calculado sobre los 100 primeros resultados (MAP@100). P@k, R@k, F1@k y NDCG@k son promedios por consulta. Posiciones sin resultado cuentan como no relevantes.</div>
     <div class="bars" style="margin:14px 0">
-      {% for m, (filas, MAP) in metricas.items() %}
+      {% for m in modelos %}
         <div class="r"><span>{{ etiquetas[m] }}</span>
-          <div><div class="b" style="width:{{ (MAP / ns.mx * 100)|round|int }}%;background:{{ colores[m] }}"></div></div>
-          <b>{{ "%.3f"|format(MAP) }}</b></div>
+          <div><div class="b" style="width:{{ (M[m].resumen['NDCG@10'] / mx.v * 100)|round|int }}%;background:{{ colores[m] }}"></div></div>
+          <b>{{ "%.3f"|format(M[m].resumen['NDCG@10']) }}</b></div>
       {% endfor %}
+      <div class="note">Barras: NDCG@10</div>
     </div>
+    <div style="overflow-x:auto">
     <table>
-      <tr><th>Modelo</th><th>MAP@10</th><th>Precision@10 media</th><th>Recall@10 media</th></tr>
-      {% for m, (filas, MAP) in metricas.items() %}
+      <tr><th>Modelo</th>{% for c in cols %}<th>{{ c }}</th>{% endfor %}<th>ms/consulta</th></tr>
+      {% for m in modelos %}
         <tr><td>{{ etiquetas[m] }}</td>
-          <td class="{{ 'best' if MAP == ns.mx }}">{{ "%.3f"|format(MAP) }}</td>
-          <td>{{ "%.3f"|format((filas|sum(attribute='precision')) / filas|length) }}</td>
-          <td>{{ "%.3f"|format((filas|sum(attribute='recall')) / filas|length) }}</td></tr>
+        {% for c in cols %}
+          {% set valores = [] %}{% for m2 in modelos %}{% set _ = valores.append(M[m2].resumen[c]) %}{% endfor %}
+          <td class="{{ 'best' if M[m].resumen[c] == valores|max }}">{{ "%.3f"|format(M[m].resumen[c]) }}</td>
+        {% endfor %}
+        <td>{{ "%.1f"|format(M[m].resumen['ms']) }}</td></tr>
       {% endfor %}
     </table>
+    </div>
   </div>
 
-  <!-- Embeddings vs BM25 -->
-  {% set emb = metricas['embeddings'][0] %}
-  {% set bm = metricas['bm25'][0] %}
-  {% set c = namespace(mejor=0, peor=0) %}
-  {% for e in emb %}
-    {% set d = e.ap - bm[loop.index0].ap %}
-    {% if d > 0.02 %}{% set c.mejor = c.mejor + 1 %}{% elif d < -0.02 %}{% set c.peor = c.peor + 1 %}{% endif %}
+  <h2>Embeddings frente a los modelos léxicos (por consulta, {{ A.metrica }}, umbral = {{ A.umbral }})</h2>
+  <div class="card">
+    {% for clave, nombre in [('emb_vs_bm25', 'BM25'), ('emb_vs_tfidf', 'TF-IDF')] %}
+      {% set c = A[clave] %}
+      <p>Frente a <b>{{ nombre }}</b>: los embeddings mejoran en <b>{{ c.mejora }}</b> consultas, empeoran en <b>{{ c.empeora }}</b>
+      y son similares en <b>{{ c.similar }}</b>. Diferencia media {{ "%+.3f"|format(c.dif_media) }}
+      (IC 95% por bootstrap: {{ "%+.3f"|format(c.ic95[0]) }} a {{ "%+.3f"|format(c.ic95[1]) }}).</p>
+    {% endfor %}
+    <div class="note">Si el intervalo incluye el 0, la diferencia media no es concluyente.</div>
+  </div>
+
+  {% for clave, titulo in [('por_longitud', 'Por longitud de la consulta'), ('por_n_rel', 'Por número de documentos relevantes'), ('por_numeros', 'Por presencia de números en la consulta')] %}
+    <h2>{{ A.metrica }} medio — {{ titulo }}</h2>
+    <div class="card"><table>
+      <tr><th>Grupo</th><th>n</th>{% for m in modelos %}<th>{{ m }}</th>{% endfor %}</tr>
+      {% for g, v in A[clave].items() %}
+        <tr><td>{{ g }}</td><td>{{ v.n }}</td>{% for m in modelos %}<td>{{ "%.3f"|format(v[m]) }}</td>{% endfor %}</tr>
+      {% endfor %}
+    </table></div>
   {% endfor %}
-  <h2>Embeddings vs. BM25 (por consulta, umbral ΔAP = 0.02)</h2>
-  <div class="card">Los embeddings mejoran a BM25 en <b>{{ c.mejor }}</b> consultas, empeoran en <b>{{ c.peor }}</b>
-    y son similares en <b>{{ emb|length - c.mejor - c.peor }}</b>.</div>
 
-  <!-- Detalle por consulta -->
-  <h2>Detalle por consulta (AP, Precision@10, Recall@10)</h2>
-  <div class="card pq" style="padding:0">
-    <table>
-      <tr><th>Consulta</th>
-        {% for m in modelos %}<th>AP {{ m }}</th><th>P</th><th>R</th>{% endfor %}</tr>
-      {% for e in emb %}
-        {% set i = loop.index0 %}
-        <tr><td>{{ e.consulta }}</td>
-          {% for m in modelos %}
-            {% set x = metricas[m][0][i] %}
-            <td>{{ "%.2f"|format(x.ap) }}</td><td>{{ "%.1f"|format(x.precision) }}</td><td>{{ "%.2f"|format(x.recall) }}</td>
-          {% endfor %}
-        </tr>
+  {% for clave, titulo in [('mejor_emb', 'Consultas donde los embeddings más superan a BM25'), ('mejor_bm25', 'Consultas donde BM25 más supera a los embeddings')] %}
+    <h2>{{ titulo }}</h2>
+    <div class="card"><table>
+      <tr><th>Consulta</th><th>Rel.</th><th>NDCG@10 BM25</th><th>NDCG@10 emb.</th><th>1.º BM25</th><th>1.º emb.</th></tr>
+      {% for e in A.ejemplos[clave] %}
+        <tr><td>{{ e.consulta }}</td><td>{{ e.n_rel }}</td>
+          <td>{{ "%.2f"|format(e.ndcg_bm25) }}</td><td>{{ "%.2f"|format(e.ndcg_emb) }}</td>
+          <td title="{{ e.top1_bm25.texto if e.top1_bm25 }}">{{ '✓' if e.top1_bm25 and e.top1_bm25.relevante else '✗' }}</td>
+          <td title="{{ e.top1_embeddings.texto if e.top1_embeddings }}">{{ '✓' if e.top1_embeddings and e.top1_embeddings.relevante else '✗' }}</td></tr>
       {% endfor %}
     </table>
-  </div>
+    <div class="note">✓ / ✗: si el primer resultado es relevante. Pasa el cursor para ver su texto.</div></div>
+  {% endfor %}
+
+  <h2>Detalle por consulta</h2>
+  <details><summary>Mostrar tabla (NDCG@10, P@10 y R@10 de cada modelo)</summary>
+  <div class="card pq" style="padding:0"><table>
+    <tr><th>Consulta</th><th>Rel.</th>{% for m in modelos %}<th>NDCG {{ m }}</th><th>P</th><th>R</th>{% endfor %}</tr>
+    {% for i in range(M['bm25'].filas|length) %}
+      <tr><td>{{ M['bm25'].filas[i].consulta }}</td><td>{{ M['bm25'].filas[i].n_rel }}</td>
+      {% for m in modelos %}{% set x = M[m].filas[i] %}
+        <td>{{ "%.2f"|format(x['NDCG@10']) }}</td><td>{{ "%.2f"|format(x['P@10']) }}</td><td>{{ "%.2f"|format(x['R@10']) }}</td>
+      {% endfor %}</tr>
+    {% endfor %}
+  </table></div></details>
 </section>
 </main>
 

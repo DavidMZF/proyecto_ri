@@ -1,11 +1,14 @@
+import json
 from flask import Flask, request, render_template
 from ri import *
 
 app = Flask(__name__)
 MODELOS = ["binario", "tfidf", "bm25", "embeddings"]
 
-sis, queries, qrels = cargar_sistema("datos")
-METRICAS = {m: evaluar(sis, m, queries, qrels) for m in MODELOS}
+sis, _, _ = cargar_sistema("datos")
+with open("datos/metricas.json", encoding="utf-8") as f:
+    METRICAS = json.load(f)
+
 
 @app.route("/", methods=["GET", "POST"])
 def inicio():
